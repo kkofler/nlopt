@@ -17,6 +17,11 @@ endmacro()
 NLOPT_add_cpp_test(t_tutorial 24 25 31 40)
 NLOPT_add_cpp_test(cpp_functor)
 
+add_executable (riesstest riesstest.c)
+target_link_libraries (riesstest ${nlopt_lib})
+target_include_directories (riesstest PRIVATE ${NLOPT_PRIVATE_INCLUDE_DIRS})
+add_dependencies (tests riesstest)
+
 # have to add timer.c and mt19937ar.c as symbols are declared extern
 set (testopt_sources testfuncs.c testfuncs.h testopt.c ${PROJECT_SOURCE_DIR}/src/util/timer.c ${PROJECT_SOURCE_DIR}/src/util/mt19937ar.c)
 if (NOT HAVE_GETOPT OR NOT HAVE_GETOPT_H)
