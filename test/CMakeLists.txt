@@ -42,7 +42,7 @@ if (NLOPT_CXX)
   set_target_properties(testopt PROPERTIES LINKER_LANGUAGE CXX)
 endif ()
 
-foreach (algo_index RANGE 28) # 42
+foreach (algo_index RANGE 42)
   foreach (obj_index RANGE 1) # 21
     set (enable_ TRUE)
     # cxx ags/stogo
@@ -50,6 +50,16 @@ foreach (algo_index RANGE 28) # 42
       if (algo_index STREQUAL 8 OR algo_index STREQUAL 9 OR algo_index STREQUAL 42)
         set (enable_ FALSE)
       endif ()
+    endif ()
+    # AUGLAG (fail with NLOPT_ROUNDOFF_LIMITED depending on random starting point)
+    if (algo_index STREQUAL 29 OR algo_index STREQUAL 30
+        OR algo_index STREQUAL 31 OR algo_index STREQUAL 32)
+      set (enable_ FALSE)
+    endif ()
+    # AUGLAG variants that require subalgorithms
+    if (algo_index STREQUAL 35 OR algo_index STREQUAL 36
+        OR algo_index STREQUAL 37 OR algo_index STREQUAL 38)
+      set (enable_ FALSE)
     endif ()
     if (enable_)
       add_test (NAME testopt_algo${algo_index}_obj${obj_index} COMMAND testopt -r 0 -a ${algo_index} -o ${obj_index})
