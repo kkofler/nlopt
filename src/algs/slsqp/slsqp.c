@@ -8,6 +8,9 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef SLSQP_OSQP
+#include <osqp.h>
+#endif
 
 #include "slsqp.h"
 
@@ -162,6 +165,7 @@ static const int c__2 = 2;
 #define MIN2(a,b) ((a) <= (b) ? (a) : (b))
 #define MAX2(a,b) ((a) >= (b) ? (a) : (b))
 
+#ifndef SLSQP_OSQP
 static void h12_(const int *mode, int *lpivot, int *l1, 
 		 int *m, double *u, const int *iue, double *up, 
 		 double *c__, const int *ice, const int *icv, const int *ncv)
@@ -1230,12 +1234,263 @@ L50:
 L75:
     return;
 } /* lsei_ */
+#endif
 
 static void lsq_(int *m, int *meq, int *n, int *nl, 
 	int *la, double *l, double *g, double *a, double *
 	b, const double *xl, const double *xu, double *x, double *y, 
 	double *w, int *jw, int *mode)
 {
+#ifdef SLSQP_OSQP
+/* Use OSQP to emulate the following interface: */
+/*   MINIMIZE with respect to X */
+/*             ||E*X - F|| */
+/*                                      1/2  T */
+/*   WITH UPPER TRIANGULAR MATRIX E = +D   *L , */
+/*                                      -1/2  -1 */
+/*                     AND VECTOR F = -D    *L  *G, */
+/*  WHERE THE UNIT LOWER TRIDIANGULAR MATRIX L IS STORED COLUMNWISE */
+/*  DENSE IN THE N*(N+1)/2 ARRAY L WITH VECTOR D STORED IN ITS */
+/* 'DIAGONAL' THUS SUBSTITUTING THE ONE-ELEMENTS OF L */
+/*   SUBJECT TO */
+/*             A(J)*X - B(J) = 0 ,         J=1,...,MEQ, */
+/*             A(J)*X - B(J) >=0,          J=MEQ+1,...,M, */
+/*             XL(I) <= X(I) <= XU(I),     I=1,...,N, */
+/*     ON ENTRY, THE USER HAS TO PROVIDE THE ARRAYS L, G, A, B, XL, XU. */
+/*     WITH DIMENSIONS: L(N*(N+1)/2), G(N), A(LA,N), B(M), XL(N), XU(N) */
+/*     THE WORKING ARRAY W MUST HAVE AT LEAST THE FOLLOWING DIMENSION: */
+/*     DIM(W) =        (3*N+M)*(N+1)                        for LSQ */
+/*                    +(N-MEQ+1)*(MINEQ+2) + 2*MINEQ        for LSI */
+/*                    +(N+MINEQ)*(N-MEQ) + 2*MEQ + N        for LSEI */
+/*                      with MINEQ = M - MEQ + 2*N */
+/*     ON RETURN, NO ARRAY WILL BE CHANGED BY THE SUBROUTINE. */
+/*     X     STORES THE N-DIMENSIONAL SOLUTION VECTOR */
+/*     Y     STORES THE VECTOR OF LAGRANGE MULTIPLIERS OF DIMENSION */
+/*           M+N+N (CONSTRAINTS+LOWER+UPPER BOUNDS) */
+/*     MODE  IS A SUCCESS-FAILURE FLAG WITH THE FOLLOWING MEANINGS: */
+/*          MODE=1: SUCCESSFUL COMPUTATION */
+/*               2: ERROR RETURN BECAUSE OF WRONG DIMENSIONS (N<1) */
+/*               3: ITERATION COUNT EXCEEDED BY NNLS */
+/*               4: INEQUALITY CONSTRAINTS INCOMPATIBLE */
+/*               5: MATRIX E IS NOT OF FULL RANK */
+/*               6: MATRIX C IS NOT OF FULL RANK */
+/*               7: RANK DEFECT IN HFTI */
+/* QP reformulation: */
+/*   MINIMIZE with respect to Y */
+/*              T       */
+/*             Y *I/2*Y */
+/*   SUBJECT TO */
+/*             F(I)  <= E*X(I) - Y(I) <= F(I),  I=1,...,N, */
+/*             B(J)  <= A(J)*X        <= B(J),  J=1,...,MEQ, */
+/*             B(J)  <= A(J)*X        <= inf,   J=MEQ+1,...,M, */
+/*             XL(I) <= X(I)          <= XU(I), I=1,...,N, */
+/*                                      1/2  T */
+/*   WITH UPPER TRIANGULAR MATRIX E = +D   *L , */
+/*                                      -1/2  -1 */
+/*                     AND VECTOR F = -D    *L  *G, */
+/*  WHERE THE UNIT LOWER TRIDIANGULAR MATRIX L IS STORED COLUMNWISE */
+/*  DENSE IN THE N*(N+1)/2 ARRAY L WITH VECTOR D STORED IN ITS */
+/* 'DIAGONAL' THUS SUBSTITUTING THE ONE-ELEMENTS OF L */
+    /* Workspace structures */
+    OSQPWorkspace *work;
+    OSQPSettings  *settings = (OSQPSettings *)c_malloc(sizeof(OSQPSettings));
+    if (!settings) {
+        *mode = 2;
+        return;
+    }
+    OSQPData      *data     = (OSQPData *)c_malloc(sizeof(OSQPData));
+    if (!data) {
+        c_free(settings);
+        *mode = 2;
+        return;
+    }
+
+    /* Populate data */
+    int i, j, k, idiag = 0, ilinvg = *n;
+    data->n = 2 * *n;
+    data->m = *n + *m + *n;
+    data->P = csc_spalloc(data->n, data->n, *n, 1, 0);
+    if (!data->P) {
+        c_free(data);
+        c_free(settings);
+        *mode = 2;
+        return;
+    }
+    vec_set_scalar(data->P->x, 1., *n);
+    for (i = 0; i < *n; i++) {
+        data->P->i[i] = *n + i;
+    }
+    for (i = 0; i < *n; i++) {
+        data->P->p[i] = 0;
+    }
+    for (i = 0; i <= *n; i++) {
+        data->P->p[*n + i] = i;
+    }
+    data->q = c_malloc(data->n * sizeof(c_float));
+    if (!data->q) {
+        csc_spfree(data->P);
+        c_free(data);
+        c_free(settings);
+        *mode = 2;
+        return;
+    }
+    vec_set_scalar(data->q, 0., data->n);
+    data->A = csc_spalloc(data->m, data->n,
+                          (*n * (*n + 1)) / 2 + (*m * *n) + *n + *n, 1, 0);
+    if (!data->A) {
+        c_free(data->q);
+        csc_spfree(data->P);
+        c_free(data);
+        c_free(settings);
+        *mode = 2;
+        return;
+    }
+    k = 0;
+    /* first N columns: coefficients of X */
+    for (i = 0; i < *n; i++) {
+        data->A->p[i] = k;
+        /* E = sqrt(D) * L^T */
+        w[idiag + i] = sqrt(l[*n * (*n + 1) / 2 - (*n - i) * (*n - i + 1) / 2]);
+        for (j = 0; j < i; j++) {
+            data->A->i[k] = j;
+            data->A->x[k++] = w[idiag + j]
+                              * l[*n * (*n + 1) / 2
+                                  - (*n - j) * (*n - j + 1) / 2
+                                  + (i - j)];
+        }
+        data->A->i[k] = i;
+        data->A->x[k++] = w[idiag + i];
+        /* A */
+        for (j = 0; j < *m; j++) {
+            data->A->i[k] = *n + j;
+            data->A->x[k++] = a[i * *la + j];
+        }
+        /* Identity */
+        data->A->i[k] = *n + *m + i;
+        data->A->x[k++] = 1.;
+    }
+    /* last N columns: coefficients of Y */
+    for (i = 0; i < *n; i++) {
+        data->A->p[*n + i] = k;
+        /* -Identity */
+        data->A->i[k] = i;
+        data->A->x[k++] = -1.;
+        /* skip the 2 zero matrix blocks */
+    }
+    data->A->p[data->n] = k;
+    data->l = c_malloc(data->m * sizeof(c_float));
+    if (!data->l) {
+        csc_spfree(data->A);
+        c_free(data->q);
+        csc_spfree(data->P);
+        c_free(data);
+        c_free(settings);
+        *mode = 2;
+        return;
+    }
+    data->u = c_malloc(data->m * sizeof(c_float));
+    if (!data->u) {
+        c_free(data->l);
+        csc_spfree(data->A);
+        c_free(data->q);
+        csc_spfree(data->P);
+        c_free(data);
+        c_free(settings);
+        *mode = 2;
+        return;
+    }
+    /* [F, F], where F = -inv(sqrt(D)) * inv(L) * G */
+    for (i = 0; i < *n; i++) {
+        w[ilinvg + i] = g[i];
+        for (j = 0; j < i; j++) {
+            w[ilinvg + i] -= l[*n * (*n + 1) / 2 - (*n - j) * (*n - j + 1) / 2
+                               + (i - j)] * w[ilinvg + j];
+        }
+        data->l[i] = -w[ilinvg + i] / w[idiag + i];
+        data->u[i] = data->l[i];
+    }
+    /* [B(1:MEQ), B(1:MEQ)] - warning: the vector b we get is actually -b! */
+    for (i = 0; i < *meq; i++) {
+        data->l[*n + i] = -b[i];
+        data->u[*n + i] = -b[i];
+    }
+    /* [B(MEQ+1:M), inf] - warning: the vector b we get is actually -b! */
+    for (; i < *m; i++) {
+        data->l[*n + i] = -b[i];
+        data->u[*n + i] = INFINITY;
+    }
+    /* [XL, XU] */
+    for (i = 0; i < *n; i++) {
+        data->l[*n + *m + i] = xl[i];
+        data->u[*n + *m + i] = xu[i];
+    }
+
+    /* Define solver settings */
+    osqp_set_default_settings(settings);
+    settings->verbose = 0;
+    settings->eps_abs = 2.2e-16;
+    settings->eps_rel = sqrt(2.2e-16);
+    settings->eps_prim_inf = 16. * 2.2e-16;
+    settings->eps_dual_inf = 16. * 2.2e-16;
+    settings->max_iter = 65536;
+
+    /* Setup workspace */
+    if (osqp_setup(&work, data, settings)) {
+        c_free(data->u);
+        c_free(data->l);
+        csc_spfree(data->A);
+        c_free(data->q);
+        csc_spfree(data->P);
+        c_free(data);
+        c_free(settings);
+        *mode = 2;
+        return;
+    }
+
+    /* Solve Problem */
+    if (osqp_solve(work)) {
+        *mode = 2;
+    } else {
+        switch (work->info->status_val) {
+            case OSQP_SOLVED:
+            case OSQP_SOLVED_INACCURATE:
+                *mode = 1;
+                for (i = 0; i < *n; i++) {
+                    x[i] = work->solution->x[i];
+                }
+                for (i = 0; i < *m; i++) {
+                    y[i] = fabs(work->solution->y[*n + i]);
+                }
+                for (i = 0; i < *n; i++) {
+                    y[*m + i] = -MIN2(-0., work->solution->y[*n + *m + i]);
+                    y[*m + *n + i] = MAX2(work->solution->y[*n + *m + i], 0.);
+                }
+                break;
+            case OSQP_PRIMAL_INFEASIBLE:
+            case OSQP_PRIMAL_INFEASIBLE_INACCURATE:
+            case OSQP_DUAL_INFEASIBLE:
+            case OSQP_DUAL_INFEASIBLE_INACCURATE:
+                *mode = 4;
+                break;
+            case OSQP_MAX_ITER_REACHED:
+                *mode = 3;
+                break;
+            default:
+                *mode = 2;
+                break;
+        }
+    }
+
+    /* Cleanup */
+    osqp_cleanup(work);
+    c_free(data->u);
+    c_free(data->l);
+    csc_spfree(data->A);
+    c_free(data->q);
+    csc_spfree(data->P);
+    c_free(data);
+    c_free(settings);
+#else
     /* Initialized data */
 
     const double one = 1.;
@@ -1431,6 +1686,7 @@ static void lsq_(int *m, int *meq, int *n, int *nl,
 	     else if (x[i__] > xu[i__]) x[i__] = xu[i__];
 	}
     }
+#endif
 /*   END OF SUBROUTINE LSQ */
 } /* lsq_ */
 

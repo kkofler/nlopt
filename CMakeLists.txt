@@ -37,6 +37,7 @@ list (APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
 option (NLOPT_CXX "enable cxx routines" ON)
 option (NLOPT_FORTRAN "enable fortran" OFF)
+option (NLOPT_OSQP "enable OSQP as QP solver for SLSQP" OFF)
 option (BUILD_SHARED_LIBS "Build NLopt as a shared library" ON)
 option (NLOPT_PYTHON "build python bindings" ON)
 option (NLOPT_OCTAVE "build octave bindings" ON)
@@ -187,6 +188,10 @@ if (NLOPT_FORTRAN)
   list (APPEND NLOPT_HEADERS ${PROJECT_BINARY_DIR}/nlopt.f)
 endif()
 
+if (NLOPT_OSQP)
+  find_package(osqp)
+endif()
+
 set (NLOPT_SOURCES
   src/algs/direct/DIRect.c src/algs/direct/direct_wrap.c src/algs/direct/DIRserial.c src/algs/direct/DIRsubrout.c src/algs/direct/direct-internal.h src/algs/direct/direct.h
   src/algs/cdirect/cdirect.c src/algs/cdirect/hybrid.c src/algs/cdirect/cdirect.h
@@ -257,7 +262,11 @@ if (NLOPT_LUKSAN)
   target_include_directories(${nlopt_lib} PRIVATE src/algs/luksan)
   target_compile_definitions (${nlopt_lib} PRIVATE NLOPT_LUKSAN)
 endif ()
-target_link_libraries (${nlopt_lib} ${M_LIBRARY})
+if (osqp_FOUND)
+  set_source_files_properties(src/algs/slsqp/slsqp.c PROPERTIES COMPILE_FLAGS -DSLSQP_OSQP)
+  target_link_libraries (${nlopt_lib} PRIVATE osqp::osqp)
+endif()
+target_link_libraries (${nlopt_lib} INTERFACE ${M_LIBRARY})
 set_target_properties (${nlopt_lib} PROPERTIES SOVERSION ${SO_MAJOR})
 set_target_properties (${nlopt_lib} PROPERTIES VERSION "${SO_MAJOR}.${SO_MINOR}.${SO_PATCH}")
 
