@@ -36,7 +36,7 @@ if (NLOPT_CXX)
   set_target_properties(testopt PROPERTIES LINKER_LANGUAGE CXX)
 endif ()
 
-foreach (algo_index RANGE 29)# 43
+foreach (algo_index RANGE 43)
   foreach (obj_index RANGE 1)# 21
     set (enable_ TRUE)
     # cxx stogo
@@ -51,6 +51,16 @@ foreach (algo_index RANGE 29)# 43
     endif ()
     # L-BFGS
     if (algo_index STREQUAL 10)
+      set (enable_ FALSE)
+    endif ()
+    # AUGLAG (fail with NLOPT_ROUNDOFF_LIMITED depending on random starting point)
+    if (algo_index STREQUAL 30 OR algo_index STREQUAL 31
+        OR algo_index STREQUAL 32 OR algo_index STREQUAL 33)
+      set (enable_ FALSE)
+    endif ()
+    # AUGLAG variants that require subalgorithms
+    if (algo_index STREQUAL 36 OR algo_index STREQUAL 37
+        OR algo_index STREQUAL 38 OR algo_index STREQUAL 39)
       set (enable_ FALSE)
     endif ()
     if (enable_)
