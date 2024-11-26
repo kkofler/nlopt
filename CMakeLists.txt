@@ -37,6 +37,7 @@ list (APPEND CMAKE_MODULE_PATH ${PROJECT_SOURCE_DIR}/cmake)
 
 option (NLOPT_CXX "enable cxx routines" ON)
 option (NLOPT_FORTRAN "enable fortran" OFF)
+option (NLOPT_DAQP "enable DAQP as QP solver for SLSQP" OFF)
 option (BUILD_SHARED_LIBS "Build NLopt as a shared library" ON)
 option (NLOPT_PYTHON "build python bindings" ON)
 option (NLOPT_OCTAVE "build octave bindings" ON)
@@ -81,6 +82,7 @@ include (CheckCXXSymbolExists)
 include (CheckCSourceCompiles)
 include (CheckCXXCompilerFlag)
 include (CheckLibraryExists)
+include (CheckStructHasMember)
 
 #==============================================================================
 # COMPILATION CHECKINGS and CONFIGURATION GENERATION
@@ -187,6 +189,24 @@ if (NLOPT_FORTRAN)
   list (APPEND NLOPT_HEADERS ${PROJECT_BINARY_DIR}/nlopt.f)
 endif()
 
+if (NLOPT_DAQP)
+  # work around https://github.com/darnstrom/daqp/issues/51
+  if (daqp_DIR)
+    if (EXISTS ${daqp_DIR}/daqp.cmake AND NOT EXISTS ${daqp_DIR}/daqpConfig.cmake)
+      file(CREATE_LINK ${daqp_DIR}/daqp.cmake ${daqp_DIR}/daqpConfig.cmake SYMBOLIC)
+    endif()
+  endif()
+  find_package(daqp)
+  # work around https://github.com/darnstrom/daqp/issues/52
+  if (daqp_FOUND AND daqp_DIR)
+    set_target_properties(daqp PROPERTIES INTERFACE_INCLUDE_DIRECTORIES "${daqp_DIR}/../include")
+  endif()
+  set(CMAKE_REQUIRED_LIBRARIES daqp m)
+  check_struct_has_member(DAQPProblem is_factored daqp/types.h
+                          HAVE_DAQPProblem_is_factored LANGUAGE C)
+  set(CMAKE_REQUIRED_LIBRARIES)
+endif()
+
 set (NLOPT_SOURCES
   src/algs/direct/DIRect.c src/algs/direct/direct_wrap.c src/algs/direct/DIRserial.c src/algs/direct/DIRsubrout.c src/algs/direct/direct-internal.h src/algs/direct/direct.h
   src/algs/cdirect/cdirect.c src/algs/cdirect/hybrid.c src/algs/cdirect/cdirect.h
@@ -257,7 +277,11 @@ if (NLOPT_LUKSAN)
   target_include_directories(${nlopt_lib} PRIVATE src/algs/luksan)
   target_compile_definitions (${nlopt_lib} PRIVATE NLOPT_LUKSAN)
 endif ()
-target_link_libraries (${nlopt_lib} ${M_LIBRARY})
+if (daqp_FOUND AND HAVE_DAQPProblem_is_factored)
+  set_source_files_properties(src/algs/slsqp/slsqp.c PROPERTIES COMPILE_FLAGS -DSLSQP_DAQP)
+  target_link_libraries (${nlopt_lib} PRIVATE daqp)
+endif()
+target_link_libraries (${nlopt_lib} INTERFACE ${M_LIBRARY})
 set_target_properties (${nlopt_lib} PROPERTIES SOVERSION ${SO_MAJOR})
 set_target_properties (${nlopt_lib} PROPERTIES VERSION "${SO_MAJOR}.${SO_MINOR}.${SO_PATCH}")
 

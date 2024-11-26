@@ -8,6 +8,12 @@
 #include <math.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef SLSQP_DEBUG
+#include <stdio.h>
+#endif
+#ifdef SLSQP_DAQP
+#include <daqp/api.h>
+#endif
 
 #include "slsqp.h"
 
@@ -162,6 +168,7 @@ static const int c__2 = 2;
 #define MIN2(a,b) ((a) <= (b) ? (a) : (b))
 #define MAX2(a,b) ((a) >= (b) ? (a) : (b))
 
+#ifndef SLSQP_DAQP
 static void h12_(const int *mode, int *lpivot, int *l1, 
 		 int *m, double *u, const int *iue, double *up, 
 		 double *c__, const int *ice, const int *icv, const int *ncv)
@@ -1230,12 +1237,181 @@ L50:
 L75:
     return;
 } /* lsei_ */
+#endif
 
 static void lsq_(int *m, int *meq, int *n, int *nl, 
 	int *la, double *l, double *g, double *a, double *
 	b, const double *xl, const double *xu, double *x, double *y, 
 	double *w, int *jw, int *mode)
 {
+#ifdef SLSQP_DAQP
+/* Use DAQP to emulate the following interface: */
+/*   MINIMIZE with respect to X */
+/*             ||E*X - F|| */
+/*                                      1/2  T */
+/*   WITH UPPER TRIANGULAR MATRIX E = +D   *L , */
+/*                                      -1/2  -1 */
+/*                     AND VECTOR F = -D    *L  *G, */
+/*  WHERE THE UNIT LOWER TRIDIANGULAR MATRIX L IS STORED COLUMNWISE */
+/*  DENSE IN THE N*(N+1)/2 ARRAY L WITH VECTOR D STORED IN ITS */
+/* 'DIAGONAL' THUS SUBSTITUTING THE ONE-ELEMENTS OF L */
+/*   SUBJECT TO */
+/*             A(J)*X - B(J) = 0 ,         J=1,...,MEQ, */
+/*             A(J)*X - B(J) >=0,          J=MEQ+1,...,M, */
+/*             XL(I) <= X(I) <= XU(I),     I=1,...,N, */
+/*     ON ENTRY, THE USER HAS TO PROVIDE THE ARRAYS L, G, A, B, XL, XU. */
+/*     WITH DIMENSIONS: L(N*(N+1)/2), G(N), A(LA,N), B(M), XL(N), XU(N) */
+/*     THE WORKING ARRAY W MUST HAVE AT LEAST THE FOLLOWING DIMENSION: */
+/*     DIM(W) = N*(N+1)/2 + M*N + 5*N + 3*M */
+/*     THE WORKING ARRAY JW MUST HAVE AT LEAST THE FOLLOWING DIMENSION: */
+/*     DIM(JW) = N + M */
+/*     ON RETURN, NO ARRAY WILL BE CHANGED BY THE SUBROUTINE. */
+/*     X     STORES THE N-DIMENSIONAL SOLUTION VECTOR */
+/*     Y     STORES THE VECTOR OF LAGRANGE MULTIPLIERS OF DIMENSION */
+/*           M+N+N (CONSTRAINTS+LOWER+UPPER BOUNDS) */
+/*     MODE  IS A SUCCESS-FAILURE FLAG WITH THE FOLLOWING MEANINGS: */
+/*          MODE=1: SUCCESSFUL COMPUTATION */
+/*               2: ERROR RETURN BECAUSE OF WRONG DIMENSIONS (N<1) */
+/*               3: ITERATION COUNT EXCEEDED BY NNLS */
+/*               4: INEQUALITY CONSTRAINTS INCOMPATIBLE */
+/*               5: MATRIX E IS NOT OF FULL RANK */
+/*               6: MATRIX C IS NOT OF FULL RANK */
+/*               7: RANK DEFECT IN HFTI */
+    /* Populate data */
+    int i, j, nn, ms, ma, mm, nnl;
+    double *R, *f, *A, *bupper, *blower, *rx, *rlam;
+    int *sense;
+    nn = *n; /* Number of decision variables */
+    ms = *n; /* Number of simple bounds */
+    ma = *m; /* Number of general linear constraints */
+    mm = ms + ma; /* Number of constraints (general + simple) */
+    R = w; /* size nn * (nn + 1) / 2 */
+    f = R + nn * (nn + 1) / 2; /* size nn */
+    A = f + nn; /* size ma * nn */
+    bupper = A + ma * nn; /* size mm */
+    blower = bupper + mm; /* size mm */
+    rx = blower + mm; /* size nn */
+    rlam = rx + nn; /* size mm */
+    sense = jw; /* size mm */
+    /*  determine whether to solve problem */
+    /*  with inconsistent linerarization (nnl=nn-1) */
+    /*  or not (nnl=nn) */
+    nnl = nn - (*nl != nn * (nn + 1) / 2 + 1);
+    /* R = sqrt(D) * L^T (such that H = R^T R) */
+    for (j = 0; j < nnl; j++) {
+        for (i = 0; i < j; i++) {
+            R[nn * (nn + 1) / 2 - (nn - i) * (nn - i + 1) / 2 + (j - i)]
+            = R[nn * (nn + 1) / 2 - (nn - i) * (nn - i + 1) / 2]
+              * l[nnl * (nnl + 1) / 2 - (nnl - i) * (nnl - i + 1) / 2 + (j - i)];
+        }
+        R[nn * (nn + 1) / 2 - (nn - j) * (nn - j + 1) / 2]
+        = sqrt(l[nnl * (nnl + 1) / 2 - (nnl - j) * (nnl - j + 1) / 2]);
+    }
+    if (j < nn) {
+        for (i = 0; i < nn - 1; i++) {
+            R[nn * (nn + 1) / 2 - (nn - i) * (nn - i + 1) / 2 + (nn - 1 - i)]
+            = 0.;
+        }
+        R[nn * (nn + 1) / 2 - 1] = l[*nl - 1];
+    }
+    /* f = G (so v = inv(R^T) * f = inv(sqrt(D)) * inv(L) * G = -F) */
+    for (j = 0; j < nnl; j++) {
+        f[j] = g[j];
+    }
+    if (j < nn) {
+        f[nn - 1] = 0.;
+    }
+    /* A = a */
+    for (j = 0; j < nn; j++) {
+        /* a (original A) */
+        for (i = 0; i < ma; i++) {
+            A[i * nn + j] = a[j * *la + i];
+        }
+    }
+    /* [XL, XU] */
+    for (i = 0; i < nn; i++) {
+        blower[i] = xl[i];
+        bupper[i] = xu[i];
+        sense[i] = 0; /* inequality constraint */
+    }
+    /* [B(1:MEQ), B(1:MEQ)] - warning: the vector b we get is actually -b! */
+    for (i = 0; i < *meq; i++) {
+        blower[nn + i] = -b[i];
+        bupper[nn + i] = -b[i];
+        sense[nn + i] = 5; /* equality constraint */
+    }
+    /* [B(MEQ+1:M), inf] - warning: the vector b we get is actually -b! */
+    for (; i < ma; i++) {
+        blower[nn + i] = -b[i];
+        bupper[nn + i] = INFINITY;
+        sense[nn + i] = 0; /* inequality constraint */
+    }
+    DAQPProblem qp = {nn,mm,ms,R,f,A,bupper,blower,sense,1};
+    DAQPResult result;
+    result.x = rx; /* primal variable */
+    result.lam = rlam; /* dual variable */
+    DAQPSettings settings;
+
+    /* Define solver settings */
+    daqp_default_settings(&settings); /* Populate settings with default values */
+    settings.progress_tol = sqrt(2.2e-16);
+    settings.primal_tol = 16. * 2.2e-16;
+    settings.dual_tol = 16. * 2.2e-16;
+    settings.iter_limit = 65536;
+
+    /* Solve the problem */
+    daqp_quadprog(&result,&qp,&settings);
+
+    /* Process the result */
+    switch (result.exitflag) {
+        case EXIT_OPTIMAL:
+        case EXIT_SOFT_OPTIMAL:
+            *mode = 1;
+            for (i = 0; i < nn; i++) {
+                x[i] = rx[i];
+                /* make sure bound constraints are satisfied, since
+                   roundoff error sometimes causes slight violations and
+                   NLopt guarantees that bounds are strictly obeyed */
+                if (x[i] < xl[i]) x[i] = xl[i];
+                else if (x[i] > xu[i]) x[i] = xu[i];
+#ifdef SLSQP_DEBUG
+                printf("x[%d] = %lg\n", i, x[i]);
+#endif
+            }
+            for (i = 0; i < ma; i++) {
+                y[i] = -rlam[nn + i];
+#ifdef SLSQP_DEBUG
+                printf("y[%d] = %lg\n", i, y[i]);
+#endif
+            }
+            for (i = 0; i < nn; i++) {
+                y[ma + i] = -MIN2(-0., rlam[i]);
+                y[ma + nn + i] = MAX2(rlam[i], 0.);
+#ifdef SLSQP_DEBUG
+                printf("y[%d] = %lg\n", ma + i, y[ma + i]);
+                printf("y[%d] = %lg\n", ma + nn + i, y[ma + nn + i]);
+#endif
+            }
+            break;
+        case EXIT_INFEASIBLE:
+        case EXIT_UNBOUNDED:
+            *mode = 4;
+            break;
+        case EXIT_ITERLIMIT:
+        case EXIT_CYCLE:
+            *mode = 3;
+            break;
+        case EXIT_NONCONVEX:
+            *mode = 5;
+            break;
+        default:
+            *mode = 2;
+            break;
+    }
+#ifdef SLSQP_DEBUG
+    printf("*mode = %d\n", *mode);
+#endif
+#else
     /* Initialized data */
 
     const double one = 1.;
@@ -1431,6 +1607,19 @@ static void lsq_(int *m, int *meq, int *n, int *nl,
 	     else if (x[i__] > xu[i__]) x[i__] = xu[i__];
 	}
     }
+#ifdef SLSQP_DEBUG
+    x++;
+    y++;
+    int i;
+    for (i = 0; i < *n; i++) {
+        printf("x[%d] = %lg\n", i, x[i]);
+    }
+    for (i = 0; i < *m + *n + *n; i++) {
+        printf("y[%d] = %lg\n", i, y[i]);
+    }
+    printf("*mode = %d\n", *mode);
+#endif
+#endif
 /*   END OF SUBROUTINE LSQ */
 } /* lsq_ */
 
@@ -2012,6 +2201,9 @@ L150:
     }
     t0 = *f + h1;
     h3 = gs - h1 * h4;
+#ifdef SLSQP_DEBUG
+    printf("h3 = %lg\n", h3);
+#endif
     *mode = 8;
     if (h3 >= 0.0) {
 	goto L110;
@@ -2396,12 +2588,18 @@ static void slsqp(int *m, int *meq, int *la, int *n,
     /* Function Body */
     n1 = *n + 1;
     mineq = *m - *meq + n1 + n1;
+#ifdef SLSQP_DAQP
+    il = n1 * (n1 + 1) / 2 + *m * n1 + 5 * n1 + 3 * *m /* for LSQ */
+         + n1 * *n / 2 + (*la << 1) + *n * 3 + n1 * 3 + 1; /* for SLSQPB */
+    im = *n + *m;
+#else
     il = (n1 * 3 + *m) * (n1 + 1) + (n1 - *meq + 1) * (mineq + 2) + (mineq << 
 	    1) + (n1 + mineq) * (n1 - *meq) + (*meq << 1) + n1 * *n / 2 + (*m 
 	    << 1) + *n * 3 + (n1 << 2) + 1;
 /* Computing MAX */
     i__1 = mineq, i__2 = n1 - *meq;
     im = MAX2(i__1,i__2);
+#endif
     if (*l_w__ < il || *l_jw__ < im) {
 	*mode = MAX2(10,il) * 1000;
 	*mode += MAX2(10,im);
@@ -2427,12 +2625,20 @@ static void slsqp(int *m, int *meq, int *la, int *n,
 
 static void length_work(int *LEN_W, int *LEN_JW, int M, int MEQ, int N)
 {
-     int N1 = N+1, MINEQ = M-MEQ+N1+N1;
+     int N1 = N+1;
+#ifdef SLSQP_DAQP
+     int LA = M > 0 ? M : 1;
+     *LEN_W = N1*(N1+1)/2 + M*N1 + 5*N1 + 3*M
+              +(N+1)*N/2 + 2*LA + 3*N + 3*N1 + 1;
+     *LEN_JW = N1 + M;
+#else
+     int MINEQ = M-MEQ+N1+N1;
      *LEN_W = (3*N1+M)*(N1+1) 
 	  +(N1-MEQ+1)*(MINEQ+2) + 2*MINEQ
           +(N1+MINEQ)*(N1-MEQ) + 2*MEQ + N1
           +(N+1)*N/2 + 2*M + 3*N + 3*N1 + 1;
      *LEN_JW = MINEQ;
+#endif
 }
 
 nlopt_result nlopt_slsqp(unsigned n, nlopt_func f, void *f_data,
